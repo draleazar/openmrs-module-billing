@@ -46,6 +46,8 @@ import org.openmrs.module.billing.api.search.BillableServiceSearch;
 import org.openmrs.module.stockmanagement.api.StockManagementService;
 import org.openmrs.module.stockmanagement.api.model.StockItem;
 import org.springframework.aop.MethodBeforeAdvice;
+import org.openmrs.module.billing.api.search.BillSearch;  
+import java.util.Collections;
 
 @Slf4j
 public class OrderCreationMethodBeforeAdvice implements MethodBeforeAdvice {
@@ -112,56 +114,72 @@ public class OrderCreationMethodBeforeAdvice implements MethodBeforeAdvice {
 	 * @param patient
 	 * @param cashierUUID
 	 */
-	public void addBillItemToBill(Order order, Patient patient, String cashierUUID, StockItem stockitem,
-	        BillableService service, Integer quantity, Date orderDate) {
-		try {
-			// Search for a bill
-			Bill activeBill = new Bill();
-			activeBill.setPatient(patient);
-			activeBill.setStatus(BillStatus.PENDING);
-			
-			// Bill Item
-			BillLineItem billLineItem = new BillLineItem();
-			List<CashierItemPrice> itemPrices = new ArrayList<>();
-			if (stockitem != null) {
-				billLineItem.setItem(stockitem);
-				itemPrices = priceService.getItemPrice(stockitem);
-			} else if (service != null) {
-				billLineItem.setBillableService(service);
-				itemPrices = priceService.getServicePrice(service);
-			}
-			
-			if (!itemPrices.isEmpty()) {
-				List<CashierItemPrice> matchingPrices = itemPrices.stream()
-				        .filter(p -> p.getPaymentMode().getUuid().equals(fetchPatientPayment(order)))
-				        .collect(Collectors.toList());
-				billLineItem.setPrice(
-				    matchingPrices.isEmpty() ? itemPrices.get(0).getPrice() : matchingPrices.get(0).getPrice());
-			} else {
-				billLineItem.setPrice(new BigDecimal("0.0"));
-			}
-			billLineItem.setQuantity(quantity);
-			billLineItem.setPaymentStatus(BillStatus.PENDING);
-			billLineItem.setLineItemOrder(0);
-			
-			// Bill
-			User user = Context.getAuthenticatedUser();
-			List<Provider> providers = new ArrayList<>(Context.getProviderService().getProvidersByPerson(user.getPerson()));
-			
-			if (!providers.isEmpty()) {
-				activeBill.setCashier(providers.get(0));
-				List<CashPoint> cashPoints = cashPointService.getAllCashPoints(false);
-				activeBill.setCashPoint(cashPoints.get(0));
-				activeBill.addLineItem(billLineItem);
-				activeBill.setStatus(BillStatus.PENDING);
-				billService.saveBill(activeBill);
-			}
-			
-		}
-		catch (Exception ex) {
-			log.error(ex.getMessage(), ex);
-		}
+
+    public void addBillItemToBill(Order order, Patient patient, String cashierUUID, StockItem stockitem,  
+        BillableService service, Integer quantity, Date orderDate) {  
+    try {  
+        // Look for an existing PENDING bill for this patient before creating a new one  
+        BillSearch billSearch = new BillSearch();  
+        billSearch.setPatientUuid(patient.getUuid());  
+        billSearch.setStatuses(Collections.singletonList(BillStatus.PENDING));  
+        List<Bill> existingBills = billService.getBills(billSearch, null);  
+  
+        Bill activeBill;  
+        if (!existingBills.isEmpty()) {  
+            // Reuse the existing pending bill — add a new line item to it  
+            activeBill = existingBills.get(0);  
+        } else {  
+            // No pending bill exists yet — create one and set cashier/cash point  
+            activeBill = new Bill();  
+            activeBill.setPatient(patient);  
+            activeBill.setStatus(BillStatus.PENDING);  
+  
+            User user = Context.getAuthenticatedUser();  
+            List<Provider> providers = new ArrayList<>(  
+                    Context.getProviderService().getProvidersByPerson(user.getPerson()));  
+            if (providers.isEmpty()) {  
+                log.error("User is not a provider");  
+                return;  
+            }  
+            activeBill.setCashier(providers.get(0));  
+            List<CashPoint> cashPoints = cashPointService.getAllCashPoints(false);  
+            activeBill.setCashPoint(cashPoints.get(0));  
+        }  
+  
+        // Build the line item  
+        BillLineItem billLineItem = new BillLineItem();  
+        List<CashierItemPrice> itemPrices = new ArrayList<>();  
+        if (stockitem != null) {  
+            billLineItem.setItem(stockitem);  
+            itemPrices = priceService.getItemPrice(stockitem);  
+        } else if (service != null) {  
+            billLineItem.setBillableService(service);  
+            itemPrices = priceService.getServicePrice(service);  
+        }  
+  
+        if (!itemPrices.isEmpty()) {  
+            List<CashierItemPrice> matchingPrices = itemPrices.stream()  
+                    .filter(p -> p.getPaymentMode().getUuid().equals(fetchPatientPayment(order)))  
+                    .collect(Collectors.toList());  
+            billLineItem.setPrice(  
+                matchingPrices.isEmpty() ? itemPrices.get(0).getPrice() : matchingPrices.get(0).getPrice());  
+        } else {  
+            billLineItem.setPrice(new BigDecimal("0.0"));  
+        }  
+        billLineItem.setQuantity(quantity);  
+        billLineItem.setPaymentStatus(BillStatus.PENDING);  
+        billLineItem.setLineItemOrder(  
+                activeBill.getLineItems() != null ? activeBill.getLineItems().size() : 0);  
+  
+        activeBill.addLineItem(billLineItem);  
+        activeBill.setStatus(BillStatus.PENDING);  
+        billService.saveBill(activeBill);  
+    }  
+    catch (Exception ex) {  
+        log.error(ex.getMessage(), ex);  
+    }  
 	}
+
 	
 	private String fetchPatientPayment(Order order) {
 		String patientPayingMethod = "";
