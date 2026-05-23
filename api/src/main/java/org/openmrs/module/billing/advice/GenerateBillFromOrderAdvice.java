@@ -30,8 +30,8 @@ import org.openmrs.module.stockmanagement.api.StockManagementService;
 import org.openmrs.module.stockmanagement.api.model.StockItem;
 import org.springframework.aop.AfterReturningAdvice;
 
-import javax.annotation.Nullable;
-import javax.validation.constraints.Null;
+//import javax.annotation.Nullable;
+//import javax.validation.constraints.Null;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -40,6 +40,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+
+//import org.openmrs.module.billing.api.base.PagingInfo;  
+import org.openmrs.module.billing.api.search.BillSearch;  
+import java.util.Collections;
 
 @Slf4j
 public class GenerateBillFromOrderAdvice implements AfterReturningAdvice {
@@ -167,57 +171,70 @@ public class GenerateBillFromOrderAdvice implements AfterReturningAdvice {
 	 * @param patient
 	 * @param cashierUUID
 	 */
-	public void addBillItemToBill(Order order, Patient patient, String cashierUUID, StockItem stockitem,
-	        BillableService service, Integer quantity, Date orderDate, BillStatus lineItemStatus) {
-		try {
-			// Search for a bill
-			Bill activeBill = new Bill();
-			activeBill.setPatient(patient);
-			activeBill.setStatus(BillStatus.PENDING);
-			BillLineItem billLineItem = new BillLineItem();
-			List<CashierItemPrice> itemPrices = new ArrayList<>();
-			if (stockitem != null) {
-				billLineItem.setItem(stockitem);
-				itemPrices = priceService.getItemPrice(stockitem);
-			} else if (service != null) {
-				billLineItem.setBillableService(service);
-				itemPrices = priceService.getServicePrice(service);
-			}
-			
-			if (!itemPrices.isEmpty()) {
-				//List<CashierItemPrice> matchingPrices = itemPrices.stream().filter(p -> p.getPaymentMode().getUuid().equals(fetchPatientPayment(order))).collect(Collectors.toList());
-				// billLineItem.setPrice(matchingPrices.isEmpty() ? itemPrices.get(0).getPrice() : matchingPrices.get(0).getPrice());
-				billLineItem.setPrice(itemPrices.get(0).getPrice());
-			} else {
-				if (stockitem != null && stockitem.getPurchasePrice() != null) {
-					billLineItem.setPrice(stockitem.getPurchasePrice());
-				} else {
-					billLineItem.setPrice(BigDecimal.ZERO);
-				}
-			}
-			billLineItem.setQuantity(quantity);
-			billLineItem.setPaymentStatus(lineItemStatus);
-			billLineItem.setLineItemOrder(0);
-			billLineItem.setOrder(order);
-			
-			// Bill
-			User user = Context.getAuthenticatedUser();
-			List<Provider> providers = new ArrayList<>(Context.getProviderService().getProvidersByPerson(user.getPerson()));
-			
-			if (!providers.isEmpty()) {
-				activeBill.setCashier(providers.get(0));
-				List<CashPoint> cashPoints = cashPointService.getAllCashPoints(false);
-				activeBill.setCashPoint(cashPoints.get(0));
-				activeBill.addLineItem(billLineItem);
-				activeBill.setStatus(BillStatus.PENDING);
-				billService.saveBill(activeBill);
-			} else {
-				log.error("User is not a provider");
-			}
-			
-		}
-		catch (Exception ex) {
-			log.error("Error sending the bill item: {}", ex.getMessage(), ex);
-		}
+
+    public void addBillItemToBill(Order order, Patient patient, String cashierUUID, StockItem stockitem,  
+        BillableService service, Integer quantity, Date orderDate, BillStatus lineItemStatus) {  
+    try {  
+        // Look for an existing PENDING bill for this patient before creating a new one  
+        BillSearch billSearch = new BillSearch();  
+        billSearch.setPatientUuid(patient.getUuid());  
+        billSearch.setStatuses(Collections.singletonList(BillStatus.PENDING));  
+        List<Bill> existingBills = billService.getBills(billSearch, null);  
+  
+        Bill activeBill;  
+        if (!existingBills.isEmpty()) {  
+            // Reuse the existing pending bill — add a new line item to it  
+            activeBill = existingBills.get(0);  
+        } else {  
+            // No pending bill exists yet — create one and set cashier/cash point  
+            activeBill = new Bill();  
+            activeBill.setPatient(patient);  
+            activeBill.setStatus(BillStatus.PENDING);  
+  
+            User user = Context.getAuthenticatedUser();  
+            List<Provider> providers = new ArrayList<>(  
+                    Context.getProviderService().getProvidersByPerson(user.getPerson()));  
+            if (providers.isEmpty()) {  
+                log.error("User is not a provider");  
+                return;  
+            }  
+            activeBill.setCashier(providers.get(0));  
+            List<CashPoint> cashPoints = cashPointService.getAllCashPoints(false);  
+            activeBill.setCashPoint(cashPoints.get(0));  
+        }  
+  
+        // Build the line item  
+        BillLineItem billLineItem = new BillLineItem();  
+        List<CashierItemPrice> itemPrices = new ArrayList<>();  
+        if (stockitem != null) {  
+            billLineItem.setItem(stockitem);  
+            itemPrices = priceService.getItemPrice(stockitem);  
+        } else if (service != null) {  
+            billLineItem.setBillableService(service);  
+            itemPrices = priceService.getServicePrice(service);  
+        }  
+  
+        if (!itemPrices.isEmpty()) {  
+            billLineItem.setPrice(itemPrices.get(0).getPrice());  
+        } else {  
+            if (stockitem != null && stockitem.getPurchasePrice() != null) {  
+                billLineItem.setPrice(stockitem.getPurchasePrice());  
+            } else {  
+                billLineItem.setPrice(BigDecimal.ZERO);  
+            }  
+        }  
+        billLineItem.setQuantity(quantity);  
+        billLineItem.setPaymentStatus(lineItemStatus);  
+        billLineItem.setLineItemOrder(  
+                activeBill.getLineItems() != null ? activeBill.getLineItems().size() : 0);  
+        billLineItem.setOrder(order);  
+  
+        activeBill.addLineItem(billLineItem);  
+        activeBill.setStatus(BillStatus.PENDING);  
+        billService.saveBill(activeBill);  
+    }  
+    catch (Exception ex) {  
+        log.error("Error sending the bill item: {}", ex.getMessage(), ex);  
+    }  
 	}
 }
